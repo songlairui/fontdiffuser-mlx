@@ -1,84 +1,79 @@
-"""FontDiffuser MLX — PyTorch 权重转 MLX 数组。
+#!/usr/bin/env python3
+"""Convert FontDiffuser PyTorch weights to MLX format."""
 
-用法：
-    from convert_weights import load_fontdiffuser_weights
-    model_weights = load_fontdiffuser_weights("ckpt/ckpt/")
-"""
-
-from __future__ import annotations
-
-import numpy as np
-import torch
+import argparse
+import sys
+import os
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def convert_conv2d_weight(w: np.ndarray) -> np.ndarray:
-    """PyTorch Conv2d [O,I,H,W] → MLX Conv2d [O,H,W,I]。"""
-    if w.ndim == 4:
-        return w.transpose(0, 2, 3, 1)
-    return w
-
-
-def convert_linear_weight(w: np.ndarray) -> np.ndarray:
-    """Linear 权重直接可用（MLX Linear 也是 [out, in]）。"""
-    return w
+from mlx_fd.weight_converter import (
+    load_pytorch_checkpoint,
+    convert_content_encoder_weights,
+    convert_style_encoder_weights,
+    convert_unet_weights,
+)
 
 
-def load_state_dict(path: str | Path) -> dict[str, np.ndarray]:
-    """加载 PyTorch state_dict 并转为 numpy。"""
-    sd = torch.load(str(path), map_location="cpu", weights_only=True)
-    return {k: v.cpu().numpy() for k, v in sd.items()}
+def main():
+    parser = argparse.ArgumentParser(description="Convert PyTorch weights to MLX format")
+    parser.add_argument(
+        "--ckpt_dir",
+        type=str,
+        required=True,
+        help="Path to PyTorch checkpoint directory containing content_encoder.pth, style_encoder.pth, unet.pth",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./mlx_weights",
+        help="Output directory for MLX weights (default: ./mlx_weights)",
+    )
+    args = parser.parse_args()
+
+    ckpt_dir = Path(args.ckpt_dir)
+    output_dir = Path(args.output_dir)
+
+    print(f"Converting PyTorch weights from {ckpt_dir}")
+    print(f"Output directory: {output_dir}\n")
+
+    # Load PyTorch weights
+    print("Loading PyTorch weights...")
+    pt_weights = load_pytorch_checkpoint(ckpt_dir)
+    print(f"  ✓ Content encoder: {len(pt_weights['content_encoder'])} tensors")
+    print(f"  ✓ Style encoder: {len(pt_weights['style_encoder'])} tensors")
+    print(f"  ✓ UNet: {len(pt_weights['unet'])} tensors\n")
+
+    # Convert weights
+    print("Converting weights...")
+    content_encoder_mlx = convert_content_encoder_weights(pt_weights["content_encoder"])
+    print(f"  ✓ Content encoder converted: {len(content_encoder_mlx)} tensors")
+
+    style_encoder_mlx = convert_style_encoder_weights(pt_weights["style_encoder"])
+    print(f"  ✓ Style encoder converted: {len(style_encoder_mlx)} tensors")
+
+    unet_mlx = convert_unet_weights(pt_weights["unet"])
+    print(f"  ✓ UNet converted: {len(unet_mlx)} tensors\n")
+
+    # Save MLX weights
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving MLX weights to {output_dir}...")
+    
+    import numpy as np
+    for name, weights in [
+        ("content_encoder", content_encoder_mlx),
+        ("style_encoder", style_encoder_mlx),
+        ("unet", unet_mlx),
+    ]:
+        output_path = output_dir / f"{name}.npz"
+        np.savez(output_path, **weights)
+        print(f"  ✓ Saved {name}.npz ({len(weights)} tensors)")
+
+    print("\n✓✓✓ Weight conversion complete! ✓✓✓")
+    print(f"\nYou can now use these weights with sample_mlx.py:")
+    print(f"  python sample_mlx.py --weights_dir {output_dir}")
 
 
-def convert_unet_weights(sd: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """转换 UNet 权重命名和布局。"""
-    out = {}
-    for k, v in sd.items():
-        # Skip spectral norm buffers (u, sv) — not needed for inference/fine-tuning
-        if ".sn_" in k or k.endswith(".u") or k.endswith(".sv"):
-            continue
-
-        # Conv2d weights: transpose
-        if v.ndim == 4:
-            v = convert_conv2d_weight(v)
-
-        out[k] = v
-    return out
-
-
-def convert_encoder_weights(sd: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """转换 Encoder 权重（ContentEncoder / StyleEncoder）。
-
-    SNConv2d 的权重已经是 normalized 的（推理时 SN 不影响）。
-    跳过 spectral norm 的 u/sv buffers。
-    """
-    out = {}
-    for k, v in sd.items():
-        if ".u" in k and v.ndim == 1 and v.shape[0] <= 2:
-            continue
-        if ".sv" in k and v.ndim == 1 and v.shape[0] <= 2:
-            continue
-
-        if v.ndim == 4:
-            v = convert_conv2d_weight(v)
-
-        out[k] = v
-    return out
-
-
-def load_fontdiffuser_weights(ckpt_dir: str | Path) -> dict[str, dict[str, np.ndarray]]:
-    """加载 FontDiffuser 全部权重并转换格式。
-
-    Returns:
-        {"unet": {...}, "style_encoder": {...}, "content_encoder": {...}}
-    """
-    ckpt_dir = Path(ckpt_dir)
-    unet_sd = load_state_dict(ckpt_dir / "unet.pth")
-    style_sd = load_state_dict(ckpt_dir / "style_encoder.pth")
-    content_sd = load_state_dict(ckpt_dir / "content_encoder.pth")
-
-    return {
-        "unet": convert_unet_weights(unet_sd),
-        "style_encoder": convert_encoder_weights(style_sd),
-        "content_encoder": convert_encoder_weights(content_sd),
-    }
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,7 @@
-"""FontDiffuser MLX — UNet 主模型。"""
+"""FontDiffuser MLX — UNet 主模型。
+
+废弃原型：当前结构与上游 FontDiffuser 不等价，不应作为主线继续修补。
+"""
 
 import mlx.core as mx
 import mlx.nn as nn

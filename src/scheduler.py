@@ -1,4 +1,7 @@
-"""FontDiffuser MLX — DDPM Scheduler + DPM-Solver++ Sampler."""
+"""FontDiffuser MLX — DDPM Scheduler + DPM-Solver++ Sampler.
+
+废弃原型：当前采样器没有等价复刻上游 DPM-Solver++ 推理链路。
+"""
 
 import mlx.core as mx
 import math

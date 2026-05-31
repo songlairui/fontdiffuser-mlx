@@ -1,5 +1,7 @@
 """FontDiffuser MLX — ContentEncoder & StyleEncoder。
 
+废弃原型：当前 encoder 结构与上游 FontDiffuser 不等价，仅保留为历史参考。
+
 CG-GAN 风格编码器，DBlock 堆叠 + SNConv2d（推理时用普通 Conv2d）。
 """
 

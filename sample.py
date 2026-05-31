@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """FontDiffuser MLX — 推理脚本。
 
+废弃原型：当前脚本没有等价复刻上游推理链路，不应作为验收入口。
+
 用法：
     cd fontdiffuser-mlx
     source ../fontdiffuser/.venv/bin/activate

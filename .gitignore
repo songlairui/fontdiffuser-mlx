@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
+mlx_weights/
+*.png
+.DS_Store

@@ -1,5 +1,7 @@
 """FontDiffuser MLX — 权重加载与映射。
 
+废弃原型：当前映射不能完整匹配上游 checkpoint，不应作为主线使用。
+
 将 PyTorch state_dict 映射到 MLX 模块参数。
 """
 

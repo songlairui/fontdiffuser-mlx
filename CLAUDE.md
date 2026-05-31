@@ -1,34 +1,18 @@
 # FontDiffuser MLX
 
-将 FontDiffuser（PyTorch 扩散字体生成模型）移植到 Apple MLX。
+始终使用简体中文回复。
 
-## 目标
+## 当前状态
 
-在 M4 Pro 上实现 ~10-18x 训练加速，用于手写字体微调。
+本仓库已废弃早期“近似 MLX 移植”方向。现有 `src/`、`sample.py`、`weights.py`、`convert_weights.py` 只能作为反例或参考片段，不能作为可运行实现继续修补。
 
-## 项目结构
+## 当前目标
 
-```
-src/
-  unet.py          # UNet 主模型
-  blocks.py        # ResBlock, Attention, StyleRSI, MCADown
-  encoders.py      # ContentEncoder, StyleEncoder
-  scheduler.py     # DDPM scheduler + DPM-Solver++
-convert_weights.py # PyTorch → MLX 权重转换
-weights.py         # 权重加载与映射
-sample.py          # 推理脚本
-train.py           # 训练循环
-```
+以 [GOAL.md](GOAL.md) 为准：基于干净克隆的上游 FontDiffuser，重新制定并实施 MLX 等价移植，目标是同时支持推理和训练。
 
-## 开发流程
+## 关键原则
 
-1. 先跑通推理（加载 PyTorch 预训练权重，验证输出一致）
-2. 实现训练循环（MLX nn.value_and_grad）
-3. 用用户手写样本微调
-
-## 关键约束
-
-- 数据布局：NHWC（MLX 原生），非 NCHW（PyTorch）
-- Conv2d 权重需 transpose：[O,I,H,W] → [O,H,W,I]
-- deform_conv2d 需要自定义实现或用标准 Conv 近似
-- GroupNorm 必须 pytorch_compatible=True
+- 先等价，后优化。
+- 先权重 100% 匹配，后训练。
+- 不用标准 Conv 假装替代 DeformConv2d；如果替代，必须明确标为模型改造而非移植。
+- 加载权重必须 fail-fast，不能静默保留随机初始化参数。

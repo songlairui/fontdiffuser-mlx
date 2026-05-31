@@ -1,5 +1,7 @@
 """FontDiffuser MLX — 核心模块。
 
+废弃原型：这些模块未与上游 FontDiffuser 等价对齐，仅保留为历史参考。
+
 NHWC 数据布局，MLX 原生。
 """
 
