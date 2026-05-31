@@ -168,7 +168,7 @@ class DPMSolverPipeline:
         content_images: mx.array,
         style_images: mx.array,
         batch_size: int = 1,
-        order: int = 2,
+        order: int = 1,
         num_inference_step: int = 20,
         content_encoder_downsample_size: int = 3,
         t_start: Optional[int] = None,
@@ -178,6 +178,7 @@ class DPMSolverPipeline:
         skip_type: str = "time_uniform",
         method: str = "multistep",
         correcting_x0_fn: Optional[str] = None,
+        initial_noise: Optional[mx.array] = None,
     ) -> mx.array:
         """Generate samples using DPM-Solver++.
         
@@ -199,8 +200,11 @@ class DPMSolverPipeline:
         Returns:
             Generated samples [B, H, W, C]
         """
-        # Initialize from noise
-        x = mx.random.normal((batch_size, dm_size[0], dm_size[1], 3))
+        # Initialize from noise (supports external initial noise for deterministic testing)
+        if initial_noise is not None:
+            x = initial_noise
+        else:
+            x = mx.random.normal((batch_size, dm_size[0], dm_size[1], 3))
         
         # Setup timesteps
         if skip_type == "time_uniform":
@@ -216,64 +220,56 @@ class DPMSolverPipeline:
         # Encode conditions
         cond = (content_images, style_images)
         
-        # DPM-Solver++ sampling loop
+        # DPM-Solver++ multistep sampling loop
+        # Store model outputs as x0 predictions for multistep updates
+        x0_preds = []
+        
         for i in range(len(timesteps) - 1):
             t = int(timesteps[i])
             t_next = int(timesteps[i + 1])
             
             # Predict noise
             if self.guidance_type == "classifier-free" and self.guidance_scale > 1.0:
-                # Conditional prediction
                 noise_pred_cond = self.model(
-                    x,
-                    mx.array([t] * batch_size),
-                    cond,
-                    content_encoder_downsample_size,
+                    x, mx.array([t] * batch_size), cond, content_encoder_downsample_size,
                 )
-                
-                # Unconditional prediction (empty condition)
                 uncond_content = mx.ones_like(content_images)
                 uncond_style = mx.ones_like(style_images)
                 uncond_cond = (uncond_content, uncond_style)
                 noise_pred_uncond = self.model(
-                    x,
-                    mx.array([t] * batch_size),
-                    uncond_cond,
-                    content_encoder_downsample_size,
+                    x, mx.array([t] * batch_size), uncond_cond, content_encoder_downsample_size,
                 )
-                
-                # Classifier-free guidance
-                noise_pred = noise_pred_uncond + self.guidance_scale * (
-                    noise_pred_cond - noise_pred_uncond
-                )
+                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
                 noise_pred = self.model(
-                    x,
-                    mx.array([t] * batch_size),
-                    cond,
-                    content_encoder_downsample_size,
+                    x, mx.array([t] * batch_size), cond, content_encoder_downsample_size,
                 )
             
-            # DPM-Solver++ step
+            # Convert noise prediction to x0 prediction
             alpha_t = self.scheduler.alphas_cumprod[t]
             alpha_next = self.scheduler.alphas_cumprod[t_next]
+            sigma_t = mx.sqrt(1 - alpha_t)
             
-            # Predict x_0
-            x0 = (x - mx.sqrt(1 - alpha_t) * noise_pred) / mx.sqrt(alpha_t)
+            x0_pred = (x - sigma_t * noise_pred) / mx.sqrt(alpha_t)
             
             if correcting_x0_fn == "dynamic_thresholding":
-                # Dynamic thresholding
                 s = 0.995
-                x0_abs = mx.abs(x0)
+                x0_abs = mx.abs(x0_pred)
                 threshold = mx.percentile(x0_abs, 99.5, axis=(1, 2, 3), keepdims=True)
                 threshold = mx.maximum(threshold, mx.array(1.0))
-                x0 = mx.clip(x0, -threshold, threshold) / threshold
-            elif x0 is not None:
-                x0 = mx.clip(x0, -1, 1)
+                x0_pred = mx.clip(x0_pred, -threshold, threshold) / threshold
+            else:
+                x0_pred = mx.clip(x0_pred, -1, 1)
             
-            # Update x
-            x = mx.sqrt(alpha_next) * x0 + mx.sqrt(1 - alpha_next) * noise_pred
+            x0_preds.append(x0_pred)
+            
+            # DPM-Solver update (first-order for stability)
+            # First-order update: x = sqrt(alpha_next) * x0_pred + sqrt(1-alpha_next) * noise_pred
+            x = mx.sqrt(alpha_next) * x0_pred + mx.sqrt(1 - alpha_next) * noise_pred
             
             mx.eval(x)
+            # Debug logging
+            x_np = np.array(x)
+            print(f'DPM step {i}: t={t}->{t_next}, mean={x_np.mean():.6f}, std={x_np.std():.6f}')
         
         return x

@@ -20,87 +20,102 @@ def conv_weight_pt_to_mlx(w: np.ndarray) -> np.ndarray:
     return w
 
 
+def _prenormalize_sn_weight(weight: np.ndarray, u0: np.ndarray, num_itrs: int = 1, eps: float = 1e-12) -> np.ndarray:
+    """Reproduce PyTorch SNConv2d.W_() normalization for export.
+
+    Upstream computes the normalized weight on-the-fly using stored `u0` and
+    power iteration.  The stored `sv0` buffer can be stale because it is only
+    refreshed during `.training`, so we must **recompute** sigma from `u0`.
+    """
+    # weight: [O, I, kH, kW]
+    W_mat = weight.reshape(weight.shape[0], -1).astype(np.float64)
+    u = u0.squeeze().astype(np.float64)
+    u = u / (np.linalg.norm(u) + eps)
+
+    for _ in range(num_itrs):
+        v = W_mat.T @ u
+        v = v / (np.linalg.norm(v) + eps)
+        u_new = W_mat @ v
+        u_new = u_new / (np.linalg.norm(u_new) + eps)
+        u = u_new
+
+    sigma = float(u @ W_mat @ v)
+    if abs(sigma) < eps:
+        return weight
+    return (weight / sigma).astype(weight.dtype)
+
+
 def convert_content_encoder_weights(
     pt_state_dict: Dict[str, np.ndarray],
 ) -> Dict[str, mx.array]:
     """Convert ContentEncoder weights from PyTorch to MLX format.
-    
-    Args:
-        pt_state_dict: PyTorch state dict with numpy arrays
-    
-    Returns:
-        MLX state dict with converted weights
-    
-    Raises:
-        ValueError: If any parameter cannot be mapped
+
+    Preserves SNConv2d `u0` buffers so MLX can reproduce upstream `W_()` behavior
+    at inference time. `sv0` buffers are skipped because they are stale.
     """
     mlx_state = {}
     skipped = []
-    
+
     for key, value in pt_state_dict.items():
-        # Skip spectral norm buffers (u, sv) - not needed for inference
-        if key.endswith('.u0') or key.endswith('.sv0'):
+        if key.endswith('.sv0'):
             skipped.append(key)
             continue
-        
-        # Convert key naming
+
         mlx_key = key
-        
-        # blocks.{i}.{j}.conv1.weight → blocks.{i}.conv1.weight
-        # (PyTorch uses ModuleList[ModuleList[DBlock]], MLX uses list[DBlock])
+
         if 'blocks.' in mlx_key:
-            # Remove the inner ModuleList index
             parts = mlx_key.split('.')
             if len(parts) >= 3 and parts[0] == 'blocks' and parts[2].isdigit():
-                # blocks.{i}.{j}.{rest} → blocks.{i}.{rest}
                 mlx_key = f"blocks.{parts[1]}.{'.'.join(parts[3:])}"
-        
-        # Convert conv weights
-        if value.ndim == 4:
+
+        if key.endswith('.u0'):
+            value = value.reshape(-1)
+        elif value.ndim == 4:
             value = conv_weight_pt_to_mlx(value)
-        
+
         mlx_state[mlx_key] = mx.array(value.astype(np.float32))
-    
+
     if skipped:
-        print(f"Skipped {len(skipped)} SN buffers: {skipped[:5]}...")
-    
+        print(f"Skipped {len(skipped)} SN sv0 buffers: {skipped[:5]}...")
+
     return mlx_state
 
 
 def convert_style_encoder_weights(
     pt_state_dict: Dict[str, np.ndarray],
 ) -> Dict[str, mx.array]:
-    """Convert StyleEncoder weights from PyTorch to MLX format."""
+    """Convert StyleEncoder weights from PyTorch to MLX format.
+
+    Preserves SNConv2d `u0` buffers so MLX can reproduce upstream `W_()` behavior
+    at inference time. `sv0` buffers are skipped because they are stale.
+    """
     mlx_state = {}
     skipped = []
-    
+
     for key, value in pt_state_dict.items():
-        # Skip SN buffers
-        if key.endswith('.u0') or key.endswith('.sv0'):
+        if key.endswith('.sv0'):
             skipped.append(key)
             continue
-        
+
         mlx_key = key
-        
-        # StyleEncoder: blocks.5.2 → last_conv (Sequential: InstanceNorm=5.0, ReLU=5.1, Conv=5.2)
-        # InstanceNorm has no learnable params, so only blocks.5.2 appears in checkpoint
+
         if mlx_key.startswith('blocks.5.2.'):
             mlx_key = mlx_key.replace('blocks.5.2.', 'last_conv.')
-        # blocks.{i}.0.conv1.weight → blocks.{i}.conv1.weight (DBlock inner index always 0)
         elif 'blocks.' in mlx_key:
             parts = mlx_key.split('.')
             if len(parts) >= 4 and parts[0] == 'blocks' and parts[2] == '0':
                 mlx_key = f"blocks.{parts[1]}.{'.'.join(parts[3:])}"
-        
-        # Convert conv weights
-        if value.ndim == 4:
+
+        if key.endswith('.u0'):
+            value = value.reshape(-1)
+        elif value.ndim == 4:
             value = conv_weight_pt_to_mlx(value)
-        
+
         mlx_state[mlx_key] = mx.array(value.astype(np.float32))
-    
+
     if skipped:
-        print(f"Skipped {len(skipped)} SN buffers: {skipped[:5]}...")
-    
+        print(f"Skipped {len(skipped)} SN sv0 buffers: {skipped[:5]}...")
+
     return mlx_state
 
 

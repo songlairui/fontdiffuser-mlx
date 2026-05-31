@@ -22,23 +22,50 @@ from mlx_fd.scheduler import DDPMScheduler
 
 
 class FontDataset:
-    """Simple font dataset for training."""
-    
+    """Font training dataset supporting real images or synthetic fallback."""
+
     def __init__(self, data_root, content_size=96, style_size=96, resolution=96):
         self.data_root = Path(data_root)
         self.content_size = content_size
         self.style_size = style_size
         self.resolution = resolution
-        
-        # TODO: Implement actual dataset loading
-        # For now, just create dummy data for testing
-        self.samples = []
-        
+
+        content_dir = self.data_root / "content"
+        style_dir = self.data_root / "style"
+        target_dir = self.data_root / "target"
+
+        if content_dir.is_dir() and style_dir.is_dir() and target_dir.is_dir():
+            content_stems = {p.stem for p in content_dir.glob("*") if p.is_file()}
+            style_stems = {p.stem for p in style_dir.glob("*") if p.is_file()}
+            target_stems = {p.stem for p in target_dir.glob("*") if p.is_file()}
+            shared = sorted(content_stems & style_stems & target_stems)
+            self.samples = [
+                {
+                    "content": content_dir / f"{stem}.png",
+                    "style": style_dir / f"{stem}.png",
+                    "target": target_dir / f"{stem}.png",
+                }
+                for stem in shared
+            ]
+            self.synthetic = False
+        else:
+            # Fallback: keep runnable for quick smoke-tests without real data
+            self.samples = [None] * 32
+            self.synthetic = True
+
     def __len__(self):
         return len(self.samples)
-    
+
     def __getitem__(self, idx):
-        return self.samples[idx]
+        if self.synthetic:
+            return None
+
+        sample = self.samples[idx]
+        return {
+            "content": load_image(sample["content"], self.content_size),
+            "style": load_image(sample["style"], self.style_size),
+            "target": load_image(sample["target"], self.resolution),
+        }
 
 
 def load_image(image_path, size):
@@ -93,6 +120,28 @@ def train_step(model, scheduler, content_imgs, style_imgs, target_imgs, optimize
     return loss
 
 
+def save_checkpoint(model, output_dir, step_or_label, checkpoint_format):
+    """Save checkpoint in the requested format."""
+    import numpy as np
+    
+    if checkpoint_format == "npz":
+        weights = {
+            "content_encoder": {k: np.array(v) for k, v in model.content_encoder.parameters().items()},
+            "style_encoder": {k: np.array(v) for k, v in model.style_encoder.parameters().items()},
+            "unet": {k: np.array(v) for k, v in model.unet.parameters().items()},
+        }
+        
+        for name, params in weights.items():
+            path = output_dir / f"{name}.npz"
+            np.savez(path, **params)
+        
+        print(f"  ✓ Saved NPZ checkpoint at step {step_or_label}")
+    else:
+        path = output_dir / f"checkpoint_{step_or_label}.safetensors"
+        model.save_weights(str(path))
+        print(f"  ✓ Saved Safetensors checkpoint at {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="FontDiffuser MLX Training")
     
@@ -125,6 +174,9 @@ def main():
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--save_interval", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=123)
+    
+    # Output
+    parser.add_argument("--checkpoint_format", type=str, default="npz", choices=["npz", "safetensors"], help="Checkpoint format: npz for sample_mlx compatibility")
     
     args = parser.parse_args()
     
@@ -187,6 +239,8 @@ def main():
         style_size=args.style_image_size,
         resolution=args.resolution,
     )
+    if dataset.synthetic:
+        print("  ⚠ Real dataset not found, using synthetic smoke-test data.")
     print(f"  ✓ Dataset loaded: {len(dataset)} samples\n")
     
     # Training loop
@@ -199,12 +253,16 @@ def main():
     start_time = time.time()
     
     while global_step < args.max_train_steps:
-        # TODO: Implement actual data loading
-        # For now, use dummy data
         batch_size = args.train_batch_size
-        content_imgs = mx.random.normal((batch_size, args.content_image_size, args.content_image_size, 3))
-        style_imgs = mx.random.normal((batch_size, args.style_image_size, args.style_image_size, 3))
-        target_imgs = mx.random.normal((batch_size, args.resolution, args.resolution, 3))
+
+        if dataset.synthetic:
+            content_imgs = mx.random.normal((batch_size, args.content_image_size, args.content_image_size, 3))
+            style_imgs = mx.random.normal((batch_size, args.style_image_size, args.style_image_size, 3))
+            target_imgs = mx.random.normal((batch_size, args.resolution, args.resolution, 3))
+        else:
+            content_imgs = mx.stack([dataset[i]["content"] for i in range(batch_size)])
+            style_imgs = mx.stack([dataset[i]["style"] for i in range(batch_size)])
+            target_imgs = mx.stack([dataset[i]["target"] for i in range(batch_size)])
         
         # Training step
         loss = train_step(
@@ -216,15 +274,23 @@ def main():
         
         if global_step % args.log_interval == 0:
             elapsed = time.time() - start_time
-            print(f"Step {global_step}/{args.max_train_steps} | Loss: {loss:.4f} | Time: {elapsed:.1f}s")
+            print(f"Step {global_step}/{args.max_train_steps} | Loss: {loss.item():.6f} | Time: {elapsed:.1f}s")
         
         # Save checkpoint
         if global_step % args.save_interval == 0 and global_step > 0:
-            checkpoint_path = output_dir / f"checkpoint_{global_step}.npz"
-            print(f"  Saving checkpoint to {checkpoint_path}...")
-            # TODO: Implement checkpoint saving
+            save_checkpoint(model, output_dir, global_step, args.checkpoint_format)
             
         global_step += 1
+    
+    save_checkpoint(model, output_dir, "final", args.checkpoint_format)
+    
+    print("\n" + "=" * 50)
+    print("✓✓✓ Training complete! ✓✓✓")
+    print("=" * 50)
+    
+    if args.checkpoint_format == "npz":
+        print(f"\nYou can now use the checkpoint with sample_mlx.py:")
+        print(f"  python sample_mlx.py --weights_dir {output_dir}")
     
     print("\n" + "=" * 50)
     print("✓✓✓ Training complete! ✓✓✓")

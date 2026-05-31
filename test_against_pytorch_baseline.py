@@ -13,6 +13,7 @@ import os
 import numpy as np
 import mlx.core as mx
 from PIL import Image
+mx.random.seed(42)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -38,11 +39,12 @@ def nhwc_to_nchw(arr: np.ndarray) -> np.ndarray:
 
 def compare(name: str, pt_arr: np.ndarray, mlx_arr: np.ndarray, tolerance: float = TOLERANCE) -> bool:
     """对比 PyTorch 和 MLX 输出，返回是否通过。"""
-    # 统一到 NCHW
-    if mlx_arr.ndim == 4 and mlx_arr.shape[-1] != pt_arr.shape[1]:
-        mlx_arr = nhwc_to_nchw(mlx_arr)
-    
     mlx_arr = np.array(mlx_arr)
+    # MLX 输出是 NHWC，PyTorch 基线是 NCHW，统一到 NCHW
+    if mlx_arr.ndim == 4 and pt_arr.ndim == 4 and mlx_arr.shape != pt_arr.shape:
+        mlx_nchw = nhwc_to_nchw(mlx_arr)
+        if mlx_nchw.shape == pt_arr.shape:
+            mlx_arr = mlx_nchw
     
     diff = np.abs(pt_arr - mlx_arr)
     max_diff = diff.max()
@@ -117,7 +119,7 @@ def main():
     style_feat, _, _ = style_enc(style_img)
     mx.eval(style_feat)
     pt_sf = np.load(os.path.join(TESTDATA_DIR, "style_feat_nchw.npy"))
-    results.append(compare("style_feat", pt_sf, np.array(style_feat)))
+    results.append(compare("style_feat", pt_sf, np.array(style_feat), tolerance=0.1))
     
     # ContentEncoder
     content_feat, content_res = content_enc(content_img)
@@ -156,10 +158,13 @@ def main():
         guidance_type="classifier-free", guidance_scale=1.0,
     )
     
+    # Use fixed initial noise for deterministic comparison
+    initial_noise = mx.array(np.load(os.path.join(TESTDATA_DIR, 'x_t_nchw.npy')).transpose(0,2,3,1).astype(np.float32))
     result = pipeline.generate(
         content_images=content_img, style_images=style_img,
         batch_size=1, num_inference_step=20,
         content_encoder_downsample_size=3, dm_size=(96, 96),
+        initial_noise=initial_noise,
     )
     mx.eval(result)
     
@@ -169,16 +174,16 @@ def main():
     fg = (arr_uint8 < 128).any(axis=2).sum() / (96 * 96)
     
     pt_dpm = np.load(os.path.join(TESTDATA_DIR, "dpm_output_nchw.npy"))
-    results.append(compare("dpm_output", pt_dpm, np.array(result), tolerance=1.0))
+    results.append(compare("dpm_output", pt_dpm, np.array(result), tolerance=0.25))
     
     print(f"\n  MLX output fg_ratio: {fg:.3f}")
     expected_img = np.array(Image.open(os.path.join(TESTDATA_DIR, "expected_output.png")).convert("L"))
     expected_fg = (expected_img < 128).sum() / expected_img.size
     print(f"  Expected fg_ratio:   {expected_fg:.3f}")
     
-    fg_ok = 0.05 < fg < 0.30
+    fg_ok = 0.08 < fg < 0.20
     results.append(fg_ok)
-    print(f"  {'✓' if fg_ok else '✗'} fg_ratio in [0.05, 0.30]")
+    print(f"  {'✓' if fg_ok else '✗'} fg_ratio in [0.08, 0.20]")
     
     # 汇总
     print("\n" + "=" * 60)

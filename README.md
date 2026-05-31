@@ -73,30 +73,34 @@ ckpt/
 └── unet.pth
 ```
 
-### 转换权重
+### 重新生成 MLX 权重
 
-```bash
-python convert_weights.py \
-  --ckpt_dir ./ckpt \
-  --output_dir ./mlx_weights
+`mlx_fd/weight_converter.py` 已支持对 `SNConv2d` 权重做谱归一化。若上游 PyTorch 权重更新或你首次本地转换，请使用：
+
+```python
+from mlx_fd.weight_converter import convert_and_save_weights
+
+convert_and_save_weights(
+    ckpt_dir="./ckpt",
+    output_dir="./mlx_weights",
+)
 ```
 
-输出 `mlx_weights/` 目录包含 MLX 格式权重（~384MB）。转换自动处理：
-- Conv2d 权重布局：`[O, I, kH, kW]` → `[O, kH, kW, I]`
-- 跳过谱归一化缓冲区（`u0`, `sv0`）
-- UNet FFN 层索引映射
-- StyleEncoder Sequential 层重映射
+这会重新生成 `mlx_weights/content_encoder.npz`、`style_encoder.npz`、`unet.npz`，并自动处理：
+- `SNConv2d` 的 `.sv0` 归一化
+- Conv2d 权重布局从 PyTorch NCHW 转为 MLX NHWC
+- SN buffer 的跳过与归一化后保存
 
 ## 使用
 
-### 推理
+### 推理 demo
 
 ```bash
 python sample_mlx.py \
   --weights_dir ./mlx_weights \
-  --content_image content.png \
-  --style_image style.png \
-  --output_path output.png
+  --content_image test_content.png \
+  --style_image test_style.png \
+  --output_path output_mlx.png
 ```
 
 参数：
@@ -106,6 +110,53 @@ python sample_mlx.py \
 - `--solver`：`ddpm`（默认）或 `dpm_solver`
 - `--guidance_scale`：classifier-free guidance 强度（默认 7.5）
 - `--seed`：随机种子
+
+### 训练 demo
+
+```bash
+python train_mlx.py \
+  --data_root ./your_dataset \
+  --output_dir ./output \
+  --train_batch_size 2 \
+  --max_train_steps 20 \
+  --save_interval 20 \
+  --checkpoint_format npz
+```
+
+数据目录结构应为：
+
+```
+your_dataset/
+├── content/
+├── style/
+└── target/
+```
+
+要求：
+- `content/`、`style/`、`target/` 中的文件名需要一一对应（例如 `0001.png`）
+- 内容图通常是标准字体字形，风格图是目标书法/手写字体样本，目标图是该字形在目标风格下的 ground truth
+- 图片会被 resize 到 96×96
+
+如果 `--data_root` 下没有这三个目录，脚本会自动退化为 synthetic smoke-test，可用于快速验证训练链路是否跑通。
+
+训练完成后，`--checkpoint_format npz` 会在 `--output_dir` 下生成：
+
+```
+output/
+├── content_encoder.npz
+├── style_encoder.npz
+└── unet.npz
+```
+
+这三个文件可直接作为下游推理入口：
+
+```bash
+python sample_mlx.py \
+  --weights_dir ./output \
+  --content_image content.png \
+  --style_image style.png \
+  --output_path result.png
+```
 
 ### Python API
 
@@ -132,15 +183,6 @@ noise_pred, offset_loss = model(
 )
 ```
 
-### 训练（框架）
-
-```bash
-python train_mlx.py \
-  --data_root /path/to/font_dataset \
-  --output_dir ./output \
-  --train_batch_size 4
-```
-
 ## 项目结构
 
 ```
@@ -156,7 +198,6 @@ fontdiffuser-mlx/
 │   ├── model.py               # FontDiffuserModel 封装
 │   ├── scheduler.py           # DDPM + DPM-Solver++ 调度器
 │   └── weight_converter.py    # 权重转换
-├── convert_weights.py         # 权重转换 CLI
 ├── sample_mlx.py              # 推理脚本
 ├── train_mlx.py               # 训练脚本
 └── test_model.py              # 验证测试

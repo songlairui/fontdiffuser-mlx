@@ -11,6 +11,7 @@ import functools
 import mlx.core as mx
 import mlx.nn as nn
 from typing import List, Tuple, Optional
+from .snconv import SNConv2d
 
 
 class DBlock(nn.Module):
@@ -37,18 +38,18 @@ class DBlock(nn.Module):
         self.preactivation = preactivation
         self.downsample = downsample
         
-        # Conv layers
-        self.conv1 = nn.Conv2d(
+        # Conv layers (SNConv2d with dynamic spectral normalization)
+        self.conv1 = SNConv2d(
             in_channels, self.hidden_channels, kernel_size, padding=padding
         )
-        self.conv2 = nn.Conv2d(
+        self.conv2 = SNConv2d(
             self.hidden_channels, out_channels, kernel_size, padding=padding
         )
         
         # Shortcut
         self.learnable_sc = (in_channels != out_channels) or downsample
         if self.learnable_sc:
-            self.conv_sc = nn.Conv2d(
+            self.conv_sc = SNConv2d(
                 in_channels, out_channels, 1, padding=0
             )
     
@@ -236,11 +237,11 @@ class StyleEncoder(nn.Module):
                 )
             )
         
-        # Last layer: InstanceNorm + ReLU + Conv1x1
-        # MLX doesn't have InstanceNorm, so we implement it
-        last_ch = self.arch['out_channels'][-1]
-        self.last_norm = nn.GroupNorm(num_groups=last_ch, dims=last_ch)  # InstanceNorm = GroupNorm with groups=channels
-        self.last_conv = nn.Conv2d(last_ch, last_ch, 1, padding=0)
+        # Last layer: InstanceNorm + ReLU + Conv1x1 (matching upstream)
+        # PyTorch InstanceNorm2d uses biased variance (correction=0) and eps inside sqrt.
+        # We implement manually to guarantee exact numerical parity.
+        self.last_norm = None
+        self.last_conv = nn.Conv2d(self.arch['out_channels'][-1], self.arch['out_channels'][-1], 1, padding=0)
     
     def __call__(
         self, x: mx.array
@@ -264,10 +265,14 @@ class StyleEncoder(nn.Module):
             if index in self.save_features[:-1]:
                 residual_features.append(h)
         
-        # Last layer
-        h = self.last_norm(h)
-        h = nn.relu(h)
-        h = self.last_conv(h)
+        # Last layer: apply twice to match upstream forward implementation
+        for _ in range(2):
+            axes = (1, 2)
+            mean = mx.mean(h, axis=axes, keepdims=True)
+            var = mx.mean((h - mean) ** 2, axis=axes, keepdims=True)
+            h = (h - mean) / mx.sqrt(var + 1e-5)
+            h = nn.relu(h)
+            h = self.last_conv(h)
         style_emd = h
         
         # Global average pooling: [B, H, W, C] -> [B, C]

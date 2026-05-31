@@ -4,11 +4,11 @@
 
 ## 当前状态
 
-本仓库已废弃早期“近似 MLX 移植”方向。现有 `src/`、`sample.py`、`weights.py`、`convert_weights.py` 只能作为反例或参考片段，不能作为可运行实现继续修补。
+早期废弃脚本和目录已从仓库根目录移除（`src/`、`sample.py`、`weights.py`、`convert_weights.py`），当前主线实现集中在 `mlx_fd/`。
 
 ## 当前目标
 
-以 [GOAL.md](GOAL.md) 为准：基于干净克隆的上游 FontDiffuser，重新制定并实施 MLX 等价移植，目标是同时支持推理和训练。
+以 [GOAL.md](GOAL.md) 为准：基于干净克隆的上游 FontDiffuser，继续推进 MLX 等价移植，目标是同时支持推理和训练。
 
 ## 关键原则
 
