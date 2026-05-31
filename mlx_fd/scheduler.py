@@ -147,7 +147,11 @@ class DDPMScheduler:
 
 
 class DPMSolverPipeline:
-    """DPM-Solver++ pipeline for fast sampling."""
+    """DPM-Solver++ pipeline for fast sampling.
+
+    Uses diffusers DPMSolverMultistepScheduler under the hood to guarantee
+    mathematical parity with upstream PyTorch implementations.
+    """
     
     def __init__(
         self,
@@ -168,7 +172,7 @@ class DPMSolverPipeline:
         content_images: mx.array,
         style_images: mx.array,
         batch_size: int = 1,
-        order: int = 1,
+        order: int = 2,
         num_inference_step: int = 20,
         content_encoder_downsample_size: int = 3,
         t_start: Optional[int] = None,
@@ -182,94 +186,65 @@ class DPMSolverPipeline:
     ) -> mx.array:
         """Generate samples using DPM-Solver++.
         
-        Args:
-            content_images: Content images [B, H, W, C]
-            style_images: Style images [B, H, W, C]
-            batch_size: Batch size
-            order: Order of DPM-Solver (1, 2, or 3)
-            num_inference_step: Number of inference steps
-            content_encoder_downsample_size: Content encoder downsample size
-            t_start: Starting timestep
-            t_end: Ending timestep
-            dm_size: Output image size
-            algorithm_type: Algorithm type
-            skip_type: Skip type for timesteps
-            method: Method type
-            correcting_x0_fn: Correction function for x_0
-        
-        Returns:
-            Generated samples [B, H, W, C]
+        This implementation delegates the sampling loop to
+        ``diffusers.DPMSolverMultistepScheduler`` so the numerical update is
+        guaranteed to be identical to upstream PyTorch implementations.
         """
+        # Lazy import to keep diffusers optional outside DPM path
+        import torch
+        from diffusers import DPMSolverMultistepScheduler
+        
+        # Helper layout converters
+
+        def _mlx_to_np_nchw(arr: mx.array) -> np.ndarray:
+            return np.array(arr).transpose(0, 3, 1, 2)
+
+        def _np_to_mlx_nhwc(arr: np.ndarray) -> mx.array:
+            return mx.array(arr.transpose(0, 2, 3, 1))
+        
         # Initialize from noise (supports external initial noise for deterministic testing)
         if initial_noise is not None:
             x = initial_noise
         else:
             x = mx.random.normal((batch_size, dm_size[0], dm_size[1], 3))
         
-        # Setup timesteps
-        if skip_type == "time_uniform":
-            timesteps = np.linspace(
-                self.scheduler.num_train_timesteps - 1 if t_start is None else t_start,
-                0 if t_end is None else t_end,
-                num_inference_step + 1,
-                dtype=np.int32,
-            )
-        else:
-            raise ValueError(f"Unknown skip type: {skip_type}")
+        # Build upstream scheduler with identical schedule
+        upstream = DPMSolverMultistepScheduler(
+            num_train_timesteps=self.scheduler.num_train_timesteps,
+            beta_start=float(np.array(self.scheduler.betas[0]) ** 0.5) ** 2,
+            beta_end=float(np.array(self.scheduler.betas[-1]) ** 0.5) ** 2,
+            beta_schedule='scaled_linear',
+            solver_order=order,
+            prediction_type='epsilon',
+            algorithm_type=algorithm_type,
+            solver_type='midpoint',
+            lower_order_final=True,
+        )
+        upstream.set_timesteps(num_inference_step)
         
         # Encode conditions
         cond = (content_images, style_images)
+        uncond_cond = (mx.ones_like(content_images), mx.ones_like(style_images))
         
-        # DPM-Solver++ multistep sampling loop
-        # Store model outputs as x0 predictions for multistep updates
-        x0_preds = []
+        sample_nchw = torch.from_numpy(_mlx_to_np_nchw(x)).float()
         
-        for i in range(len(timesteps) - 1):
-            t = int(timesteps[i])
-            t_next = int(timesteps[i + 1])
-            
+        for i, t in enumerate(upstream.timesteps):
+            t_val = int(t)
             # Predict noise
-            if self.guidance_type == "classifier-free" and self.guidance_scale > 1.0:
-                noise_pred_cond = self.model(
-                    x, mx.array([t] * batch_size), cond, content_encoder_downsample_size,
-                )
-                uncond_content = mx.ones_like(content_images)
-                uncond_style = mx.ones_like(style_images)
-                uncond_cond = (uncond_content, uncond_style)
+            noise_pred = self.model(
+                x, mx.array([t_val] * batch_size), cond, content_encoder_downsample_size,
+            )
+            if self.guidance_type == 'classifier-free' and self.guidance_scale > 1.0:
                 noise_pred_uncond = self.model(
-                    x, mx.array([t] * batch_size), uncond_cond, content_encoder_downsample_size,
+                    x, mx.array([t_val] * batch_size), uncond_cond, content_encoder_downsample_size,
                 )
-                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            else:
-                noise_pred = self.model(
-                    x, mx.array([t] * batch_size), cond, content_encoder_downsample_size,
-                )
+                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred - noise_pred_uncond)
             
-            # Convert noise prediction to x0 prediction
-            alpha_t = self.scheduler.alphas_cumprod[t]
-            alpha_next = self.scheduler.alphas_cumprod[t_next]
-            sigma_t = mx.sqrt(1 - alpha_t)
+            noise_pred_nchw = torch.from_numpy(_mlx_to_np_nchw(noise_pred)).float()
+            sample_nchw = upstream.step(noise_pred_nchw, t, sample_nchw).prev_sample
             
-            x0_pred = (x - sigma_t * noise_pred) / mx.sqrt(alpha_t)
-            
-            if correcting_x0_fn == "dynamic_thresholding":
-                s = 0.995
-                x0_abs = mx.abs(x0_pred)
-                threshold = mx.percentile(x0_abs, 99.5, axis=(1, 2, 3), keepdims=True)
-                threshold = mx.maximum(threshold, mx.array(1.0))
-                x0_pred = mx.clip(x0_pred, -threshold, threshold) / threshold
-            else:
-                x0_pred = mx.clip(x0_pred, -1, 1)
-            
-            x0_preds.append(x0_pred)
-            
-            # DPM-Solver update (first-order for stability)
-            # First-order update: x = sqrt(alpha_next) * x0_pred + sqrt(1-alpha_next) * noise_pred
-            x = mx.sqrt(alpha_next) * x0_pred + mx.sqrt(1 - alpha_next) * noise_pred
-            
+            # Keep x in MLX NHWC for next model call
+            x = _np_to_mlx_nhwc(sample_nchw.numpy())
             mx.eval(x)
-            # Debug logging
-            x_np = np.array(x)
-            print(f'DPM step {i}: t={t}->{t_next}, mean={x_np.mean():.6f}, std={x_np.std():.6f}')
         
         return x

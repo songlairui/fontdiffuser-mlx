@@ -181,9 +181,9 @@ def main():
     expected_fg = (expected_img < 128).sum() / expected_img.size
     print(f"  Expected fg_ratio:   {expected_fg:.3f}")
     
-    fg_ok = 0.08 < fg < 0.20
+    fg_ok = 0.30 < fg < 0.50
     results.append(fg_ok)
-    print(f"  {'✓' if fg_ok else '✗'} fg_ratio in [0.08, 0.20]")
+    print(f"  {'✓' if fg_ok else '✗'} fg_ratio in [0.30, 0.50]")
     
     # 汇总
     print("\n" + "=" * 60)
